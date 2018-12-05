@@ -17,6 +17,7 @@ import datetime
 import imutils
 
 import re            # for finding USB devices
+import shlex
 import subprocess
 
 #Libraries
@@ -97,11 +98,13 @@ class SonarDistance(threading.Thread):
     global distance
     while sonar1.running:
       distance0 = Ping()
-      time.sleep(1)
+      time.sleep(2)
       distance1 = Ping()
       if distance1 > (distance0 + 10) or distance1 < (distance0 - 10):
+        print 'SONAR detected Movement at distance ='+str(distance1)+' cm'
         Sonar_Movement = True
         distance = distance1
+        time.sleep(5)
       else:
         Sonar_Movement = False
     print "Exiting Sonar Thread...\n"
@@ -113,35 +116,30 @@ class CamMovement(threading.Thread):
     global HighRes_Cam
     global vs
     threading.Thread.__init__(self)
-    device_re = re.compile("Bus\s+(?P<bus>\d+)\s+Device\s+(?P<device>\d+).+ID\s(?P<id1>\w+)+:+(?P<id2>\w+)\s(?P<tag>.+)$", re.I)
-    df = subprocess.check_output("lsusb")
-    devices = []
-    for i in df.split('\n'):
+    device_re = re.compile("\t/dev/video(?P<HDCam>\d+)$", re.I)
+    args = shlex.split("v4l2-ctl --list-devices")
+#    device_re = re.compile("Bus\s+(?P<bus>\d+)\s+Device\s+(?P<device>\d+).+ID\s(?P<id1>\w+)+:+(?P<id2>\w+)\s(?P<tag>.+)$", re.I)
+    df = subprocess.check_output(args)
+    lines = iter(df.split('\n'))
+    for i in lines:
         if i:
-            info = device_re.match(i)
+            info = re.search("LifeCam\sStudio", i)
             if info:
-                dinfo = info.groupdict()
-                dinfo.pop('bus')
-                dinfo.pop('id2')
-                if dinfo['id1'] == '045e':             # since all cameras are Microsoft this works....
-                  devices.append(dinfo)
-    devices.sort()
-    # print devices
-    
-    cam_count = len(devices) - 1     # Get the count of Microsoft cameras attached via USB)
-    
-    for i in range(cam_count+1):
-      dinfo = devices[i]
-      if dinfo['tag'] == 'Microsoft Corp. LifeCam Studio':
-        HighRes_Cam = i
-        print 'High Res Cam is INDEX:'+str(HighRes_Cam)+' MODEL: '+dinfo['tag']
-        break
-    
+                info = device_re.match(lines.next())
+                if info:
+                    dinfo = info.groupdict()
+                    cam_count = cam_count + 1
+                    HighRes_Cam = int(dinfo['HDCam'])
+            else:
+                info = re.search("\t/dev/video\d+$", i)
+                if info:
+                    cam_count = cam_count + 1
+ 
     i = 0
-    vs = [cv2.VideoCapture(i)]
+    
+    print 'HighRes_Cam is '+str(HighRes_Cam)+'\n'
     
     while i < cam_count:
-        i = i+1
         try:
           vs.append(cv2.VideoCapture(i))
           if not vs[i].isOpened():
@@ -150,6 +148,8 @@ class CamMovement(threading.Thread):
             vs.pop(i)
             i = i -1
             break
+#          print 'Webcam: '+str(i)+' WIDTH: '+str(vs[i].get(3))+' HEIGHT: '+str(vs[i].get(4))+' FPS: '+str(vs[i].get(5))+' Format: '+str(vs[i].get(8))+' Mode: '+str(vs[i].get(9))+' Bright: '+str(vs[i].get(10))+' Contr: '+str(vs[i].get(11))+' Sat: '+str(vs[i].get(12))
+          i = i+1
         except Exception as ex:
           template = "An exception of type {0} occurred. Arguments:\n{1!r}"
           message = template.format(type(ex).__name__, ex.args)
@@ -223,7 +223,7 @@ class CamMovement(threading.Thread):
         (x, y, w, h) = cv2.boundingRect(c)
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
         text = "Occupied"
-        Caption = text+'! Address: '+address
+        Caption = text+' !'
     
     	# draw the text and timestamp on the frame
       cv2.putText(frame, "Room Status: {}".format(Caption), (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
@@ -232,17 +232,21 @@ class CamMovement(threading.Thread):
     	# show the frame
       if text == "Occupied":
         print 'Movement detected '+datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p")
-        print 'Location: '+address+'\n'
+        print 'Location: '+address
         cv2.imwrite(str(hits)+'_Security'+'.png', frame)
-        for x in range(cam_count+1):
+        for x in range(cam_count):
           if x != HighRes_Cam:
             retval, frame = vs[x].read()
+            Caption = str(x)
+            cv2.putText(frame, "Camera: {}".format(Caption), (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.putText(frame, datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p"), (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
             cv2.imwrite(str(hits)+'_Cam'+str(x)+'_'+'.png', frame)
         hits = hits + 1
         Movement = True
         sleep(4)            # give it 4 secs before you grab more frames
       else:
         Movement = False
+
       
       #DEBUG
       # print 'DEBUG: looping HITS='+str(hits)
@@ -253,9 +257,9 @@ class CamMovement(threading.Thread):
              
     print "Exiting Camera Thread...\n"
     i = 0
-    while i < cam_count:
+    while i < (cam_count-1):
         vs[i].release()
-        del(vs[i])
+        vs.pop(i)
         i = i + 1
     
 
@@ -294,12 +298,20 @@ if __name__ == '__main__':
     sonar1.start() # start sonar
     while gpsd.fix.latitude == 0:
        time.sleep(3)
-  
+    
     ltlg = str(gpsd.fix.latitude)+','+str(gpsd.fix.longitude)
     payload = {'latlng': ltlg, 'key': 'AIzaSyCFAu81ebNZ36Bi557-SFKg19wMQ848EcU'}
    
-    # print "Latitude and Longitude: " + ltlg
-    r = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=payload)
+    print "Latitude and Longitude: " + ltlg
+    
+    sys.stdout.flush()
+
+    try:
+      r = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=payload)
+    except (Exception):
+      print 'BAD HTTPS request'
+      r = requests.get('http://www.google.com')
+      r.ok = False
 
 # For successful API call, response code will be 200 (OK)
     if(r.ok):
@@ -321,9 +333,10 @@ if __name__ == '__main__':
         
     while True:
       if Movement:
-        print 'Movement at '+str(distance)+'\n'
-
-      time.sleep(2) #set to whatever
+        print 'Camera detected movement might be at '+str(distance)+' cm'
+      if Sonar_Movement:
+        print 'Sonar detected movement at '+str(distance)+' cm'
+      time.sleep(3) #set to whatever
 
   except (KeyboardInterrupt, SystemExit): #when you press ctrl+c
     print "\nKilling Thread..."
