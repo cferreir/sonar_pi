@@ -17,6 +17,7 @@ import datetime
 import imutils
 
 import re            # for finding USB devices
+import shlex
 import subprocess
 
 #Libraries
@@ -44,6 +45,7 @@ HighRes_Cam = 0 #default is 0 camera
 address = 'NOWHERE' # address is global
 Movement = False  #Default nobody home
 Sonar_Movement = False # No Movement
+vs = [] # init VS array
 
 def Ping():
   GPIO.output(GPIO_TRIGGER, True)
@@ -82,7 +84,8 @@ class GpsPoller(threading.Thread):
     global gpsd
     while gpsp.running:
       gpsd.next() #this will continue to loop and grab EACH set of gpsd info to clear the buffer
-
+    print "Exiting GPS Thread...\n"
+    
 class SonarDistance(threading.Thread):
   def __init__(self):
     threading.Thread.__init__(self)
@@ -95,10 +98,13 @@ class SonarDistance(threading.Thread):
     global distance
     while sonar1.running:
       distance0 = Ping()
-      time.sleep(1)
+      time.sleep(2)
       distance1 = Ping()
       if distance1 > (distance0 + 10) or distance1 < (distance0 - 10):
+        print 'SONAR detected Movement at distance ='+str(distance1)+' cm'
         Sonar_Movement = True
+        distance = distance1
+        time.sleep(5)
       else:
         Sonar_Movement = False
     print "Exiting Sonar Thread...\n"
@@ -108,36 +114,32 @@ class CamMovement(threading.Thread):
   def __init__(self):
     global cam_count
     global HighRes_Cam
+    global vs
     threading.Thread.__init__(self)
-    device_re = re.compile("Bus\s+(?P<bus>\d+)\s+Device\s+(?P<device>\d+).+ID\s(?P<id1>\w+)+:+(?P<id2>\w+)\s(?P<tag>.+)$", re.I)
-    df = subprocess.check_output("lsusb")
-    devices = []
-    for i in df.split('\n'):
+    device_re = re.compile("\t/dev/video(?P<HDCam>\d+)$", re.I)
+    args = shlex.split("v4l2-ctl --list-devices")
+#    device_re = re.compile("Bus\s+(?P<bus>\d+)\s+Device\s+(?P<device>\d+).+ID\s(?P<id1>\w+)+:+(?P<id2>\w+)\s(?P<tag>.+)$", re.I)
+    df = subprocess.check_output(args)
+    lines = iter(df.split('\n'))
+    for i in lines:
         if i:
-            info = device_re.match(i)
+            info = re.search("LifeCam\sStudio", i)
             if info:
-                dinfo = info.groupdict()
-                dinfo.pop('bus')
-                dinfo.pop('id2')
-                if dinfo['id1'] == '045e':             # since all cameras are Microsoft this works....
-                  devices.append(dinfo)
-    devices.sort()
-    print devices
-    
-    cam_count = len(devices) - 1     # Get the count of Microsoft cameras attached via USB)
-    
-    for i in range(cam_count+1):
-      dinfo = devices[i]
-      if dinfo['tag'] == 'Microsoft Corp. LifeCam Studio':
-        HighRes_Cam = i
-        print 'High Res Cam is INDEX:'+str(HighResCam)
-        break
-    
+                info = device_re.match(lines.next())
+                if info:
+                    dinfo = info.groupdict()
+                    cam_count = cam_count + 1
+                    HighRes_Cam = int(dinfo['HDCam'])
+            else:
+                info = re.search("\t/dev/video\d+$", i)
+                if info:
+                    cam_count = cam_count + 1
+ 
     i = 0
-    vs = [cv2.VideoCapture(i)]
+    
+    print 'HighRes_Cam is '+str(HighRes_Cam)+'\n'
     
     while i < cam_count:
-        i = i+1
         try:
           vs.append(cv2.VideoCapture(i))
           if not vs[i].isOpened():
@@ -146,6 +148,8 @@ class CamMovement(threading.Thread):
             vs.pop(i)
             i = i -1
             break
+#          print 'Webcam: '+str(i)+' WIDTH: '+str(vs[i].get(3))+' HEIGHT: '+str(vs[i].get(4))+' FPS: '+str(vs[i].get(5))+' Format: '+str(vs[i].get(8))+' Mode: '+str(vs[i].get(9))+' Bright: '+str(vs[i].get(10))+' Contr: '+str(vs[i].get(11))+' Sat: '+str(vs[i].get(12))
+          i = i+1
         except Exception as ex:
           template = "An exception of type {0} occurred. Arguments:\n{1!r}"
           message = template.format(type(ex).__name__, ex.args)
@@ -161,13 +165,25 @@ class CamMovement(threading.Thread):
   def run(self):
     global address
     global HighRes_Cam
-    global NoMovement
+    global Movement
+    global vs
+    firstFrame = None
+    hits = 0                                 # counter for us to cycle over files
+    
+    #DEBUG
+    # print 'DEBUG: Entering main camera monitor loop'
+    #DEBUG
+    CHNG_THRESH = 65   # Change Threshold used to be 25    
+    
     while Move1.running:
-      CHNG_THRESH = 50   # Change Threshold used to be 25
+
       # grab the current frame and initialize the occupied/unoccupied
-      # text
       retval, frame = vs[HighRes_Cam].read()
       text = "Unoccupied"
+      
+      #DEBUG
+      # cv2.imwrite('FRAME.png', frame)
+      #DEBUG
       
     	# if the frame could not be grabbed, then we have reached the end
     	# of the video
@@ -199,42 +215,51 @@ class CamMovement(threading.Thread):
       cnts = cnts[0] if imutils.is_cv2() else cnts[1]
       
       # loop over the contours
+      Caption = "Empty"
       for c in cnts:
     
         # compute the bounding box for the contour, draw it on the frame,
         # and update the text
         (x, y, w, h) = cv2.boundingRect(c)
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        text = "Occupied at "+address
+        text = "Occupied"
+        Caption = text+' !'
     
     	# draw the text and timestamp on the frame
-      cv2.putText(frame, "Room Status: {}".format(text), (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+      cv2.putText(frame, "Room Status: {}".format(Caption), (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
       cv2.putText(frame, datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p"), (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
       
-    	# show the frame and record if the user presses a key
-
+    	# show the frame
       if text == "Occupied":
-        print 'Movement detected '+datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p")+'\n'
-        print 'Location: '+address+'\n'
-        cv2.imwrite('Security'+str(hits)+'.png', frame)
+        print 'Movement detected '+datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p")
+        print 'Location: '+address
+        cv2.imwrite(str(hits)+'_Security'+'.png', frame)
         for x in range(cam_count):
-          if x != HighResCam:
-            retval, frame = vs[x+1].read()
-            cv2.imwrite('Cam'+str(x+1)+'_'+str(hits)+'.png', frame)
+          if x != HighRes_Cam:
+            retval, frame = vs[x].read()
+            Caption = str(x)
+            cv2.putText(frame, "Camera: {}".format(Caption), (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.putText(frame, datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p"), (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+            cv2.imwrite(str(hits)+'_Cam'+str(x)+'_'+'.png', frame)
         hits = hits + 1
         Movement = True
         sleep(4)            # give it 4 secs before you grab more frames
       else:
         Movement = False
-        
+
+      
+      #DEBUG
+      # print 'DEBUG: looping HITS='+str(hits)
+      #DEBUG      
+      
       if hits > 19:        # recycle videos so as not to eat space
         hits = 0
              
     print "Exiting Camera Thread...\n"
     i = 0
-    while i < cam_count:
+    while i < (cam_count-1):
         vs[i].release()
-        del(vs[i])
+        vs.pop(i)
         i = i + 1
     
 
@@ -260,24 +285,33 @@ def draw_rects(img, rects, color):
 
 
 if __name__ == '__main__':
-  gpsp = GpsPoller() # create the thread
-  sonar1 = SonarDistance() # create sonar thread
-  Move1 = CamMovement() # Open Cam and start checking for motion
 
   sys.stdout = open('monitor.log', 'w')
   print 'Camera and Sonar Monitoring Log for '+datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p")+'\n\n'
+  
+  gpsp = GpsPoller() # create the thread
+  sonar1 = SonarDistance() # create sonar thread
+  Move1 = CamMovement() # Open Cam and start checking for motion
 
   try:
     gpsp.start() # start it up
     sonar1.start() # start sonar
     while gpsd.fix.latitude == 0:
        time.sleep(3)
-  
+    
     ltlg = str(gpsd.fix.latitude)+','+str(gpsd.fix.longitude)
     payload = {'latlng': ltlg, 'key': 'AIzaSyCFAu81ebNZ36Bi557-SFKg19wMQ848EcU'}
    
     print "Latitude and Longitude: " + ltlg
-    r = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=payload)
+    
+    sys.stdout.flush()
+
+    try:
+      r = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=payload)
+    except (Exception):
+      print 'BAD HTTPS request'
+      r = requests.get('http://www.google.com')
+      r.ok = False
 
 # For successful API call, response code will be 200 (OK)
     if(r.ok):
@@ -286,69 +320,30 @@ if __name__ == '__main__':
         # Loads (Load String) takes a Json file and converts into python data structure (dict or list, depending on JSON)
         jData = json.loads(r.content)
 
-        print("The response contains {0} properties".format(len(jData)))
-        print("\n")
-        # for key in jData:
-        #    print key + " : " + jData[key]
+        # print("The response contains {0} properties".format(len(jData)))
+        # print("\n")
         address = jData['results'][0]['formatted_address']
-        print address+'\n' 
-        # print "JSON Output: " + json.dumps(jData)
-        # print "END JSON ****************************************************"
+        print 'Monitoring at address: '+address+'\n' 
     else:
         # If response code is not ok (200), print the resulting http error code with description
         r.raise_for_status()
-        print "END OF ERROR *******************"
+        print "Address API Error\n"
 
     Move1.start() # Start checking for movement
-    
-    if Movement:
-    
-    old_distance = 0
-     
-    camera = cv2.VideoCapture(HighRes_cam)
-    
-    counter = 0
-    old_lat = round(gpsd.fix.latitude, 4)
-    old_long = round(gpsd.fix.longitude, 4)
-    
-    face_cascade = cv2.CascadeClassifier('/usr/share/opencv/haarcascades/haarcascade_frontalface_alt.xml')
-
+        
     while True:
-      # os.system('clear')
-      curr_lat = round(gpsd.fix.latitude, 4)
-      curr_long = round(gpsd.fix.longitude, 4)
-      if (old_distance-10 > distance) or (old_distance+10 < distance):
-        image = get_image(5)
-        cv2.imwrite('opencv'+str(counter)+'.png', image)
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
-        cv2.imwrite('opencv'+str(counter)+'GRAY.png', gray)
-#        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-        rects = detect(gray, face_cascade)
-        if (rects != []):
-          vis = image.copy()
-          draw_rects(vis, rects, (0, 255, 0))
-#        for (x,y,w,h) in faces:
-#            image = cv2.rectangle(image,(x,y),(x+w,y+h),(255,0,0),2)
-#            roi_gray = gray[y:y+h, x:x+w]
-#            roi_color = image[y:y+h, x:x+w]
-          cv2.imwrite('opencv'+str(counter)+'FACE.png', vis)
-        counter = counter + 1
-        old_distance = distance
-        old_lat = round(gpsd.fix.latitude, 4)
-        old_long = round(gpsd.fix.longitude, 4)
-      else:
-        print "Measured Distance is same"
-
-      time.sleep(2) #set to whatever
+      if Movement:
+        print 'Camera detected movement might be at '+str(distance)+' cm'
+      if Sonar_Movement:
+        print 'Sonar detected movement at '+str(distance)+' cm'
+      time.sleep(3) #set to whatever
 
   except (KeyboardInterrupt, SystemExit): #when you press ctrl+c
     print "\nKilling Thread..."
-    del(camera)
     Move1.running = False
     gpsp.running = False
     sonar1.running = False
-    gpsp.join() # wait for the thread to finish what it's doing
+    Move1.join() # wait for the thread to finish what it's doing
   print "Done.\nExiting."
 
  

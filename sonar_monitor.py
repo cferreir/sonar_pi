@@ -173,7 +173,7 @@ class CamMovement(threading.Thread):
     #DEBUG
     # print 'DEBUG: Entering main camera monitor loop'
     #DEBUG
-    CHNG_THRESH = 50   # Change Threshold used to be 25    
+    CHNG_THRESH = 65   # Change Threshold used to be 25    
     
     while Move1.running:
 
